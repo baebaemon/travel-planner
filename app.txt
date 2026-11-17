@@ -1,0 +1,516 @@
+(() => {
+'use strict';
+
+/* ---------- 설정 ---------- */
+const KEY = 'travel-planner-v1';
+const RES_TYPES = ['항공', '숙소', '교통', '투어·입장권', '식당', '렌터카', '기타'];
+const TODO_GROUPS = ['서류', '준비물', '예약 확인', '기타'];
+const ITIN_CATS = ['관광', '식사', '이동', '쇼핑', '휴식', '기타'];
+const EXP_CATS = ['교통', '숙박', '식비', '관광', '쇼핑', '기타'];
+const LIST = { itin: 'itinerary', res: 'reservations', todo: 'todos', exp: 'expenses', info: 'info' };
+const DOW = ['일', '월', '화', '수', '목', '금', '토'];
+
+/* ---------- 유틸 ---------- */
+const $ = (s) => document.querySelector(s);
+const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const won = (n) => (Number(n) || 0).toLocaleString('ko-KR') + '원';
+const sum = (arr) => arr.reduce((s, v) => s + (Number(v) || 0), 0);
+const pad = (n) => String(n).padStart(2, '0');
+const iso = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const parseDate = (s) => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
+const addDays = (s, n) => { const d = parseDate(s); d.setDate(d.getDate() + n); return iso(d); };
+const today = () => iso(new Date());
+const diffDays = (a, b) => Math.round((parseDate(b) - parseDate(a)) / 86400000); // b - a
+const fmtDate = (s) => { const d = parseDate(s); return `${d.getMonth() + 1}/${d.getDate()} (${DOW[d.getDay()]})`; };
+const fmtDT = (s) => { if (!s) return '—'; const [d, t] = s.split('T'); return fmtDate(d) + (t ? ' ' + t : ''); };
+const timeOf = (s) => (s && s.includes('T') ? s.split('T')[1] : '');
+const dayOf = (s) => (s || '').slice(0, 10);
+const byStart = (a, b) => (a.start || '9999').localeCompare(b.start || '9999');
+const byTime = (a, b) => (a.time || '99:99').localeCompare(b.time || '99:99');
+const safeUrl = (u) => (/^https?:\/\//i.test(u) ? u : 'https://' + u);
+
+let toastTimer;
+function toast(msg) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (t.hidden = true), 1800);
+}
+
+/* ---------- 데이터 ---------- */
+function emptyState() {
+  return {
+    trip: { name: '12월 여행', destination: '', start: '2026-12-01', end: '2026-12-31', budget: 0 },
+    itinerary: [],
+    reservations: [],
+    todos: [],
+    expenses: [],
+    info: [],
+    sample: false,
+  };
+}
+
+function sampleState() {
+  const s = emptyState();
+  s.trip.destination = '여행지를 입력하세요';
+  s.trip.budget = 3000000;
+  s.itinerary = [
+    { id: uid(), date: '2026-12-01', time: '09:00', title: '공항으로 출발 (2시간 전 도착)', place: '', category: '이동', memo: '' },
+    { id: uid(), date: '2026-12-01', time: '18:00', title: '숙소 체크인 후 저녁', place: '', category: '식사', memo: '' },
+    { id: uid(), date: '2026-12-05', time: '10:00', title: '근교 당일치기', place: '', category: '관광', memo: '날씨 확인' },
+  ];
+  s.reservations = [
+    { id: uid(), type: '항공', title: '왕복 항공권', code: 'ABC123', start: '2026-12-01T10:00', end: '2026-12-01T13:00', place: '출발 공항', cost: 800000, paid: true, url: '', memo: '' },
+    { id: uid(), type: '숙소', title: '샘플 호텔', code: '', start: '2026-12-01T15:00', end: '2026-12-05T11:00', place: '', cost: 600000, paid: false, url: '', memo: '조식 포함 여부 확인' },
+  ];
+  s.todos = [
+    { id: uid(), group: '서류', text: '여권 유효기간 6개월 이상 확인', done: false },
+    { id: uid(), group: '준비물', text: '어댑터 / 보조배터리', done: false },
+    { id: uid(), group: '예약 확인', text: '숙소 예약 확정 메일 확인', done: false },
+  ];
+  s.expenses = [{ id: uid(), date: '2026-12-01', category: '교통', title: '공항 교통', amount: 50000 }];
+  s.info = [
+    { id: uid(), label: '여권 만료일', value: '' },
+    { id: uid(), label: '여행자 보험', value: '' },
+    { id: uid(), label: '긴급 연락처', value: '' },
+    { id: uid(), label: '대사관 / 영사관', value: '' },
+  ];
+  s.sample = true;
+  return s;
+}
+
+function normalize(obj) {
+  const base = emptyState();
+  const arr = (x) => (Array.isArray(x) ? x : []);
+  return {
+    trip: { ...base.trip, ...(obj.trip || {}) },
+    itinerary: arr(obj.itinerary),
+    reservations: arr(obj.reservations),
+    todos: arr(obj.todos),
+    expenses: arr(obj.expenses),
+    info: arr(obj.info),
+    sample: false,
+  };
+}
+
+function load() {
+  try {
+    const raw = localStorage.getItem(KEY);
+    if (raw) return normalize(JSON.parse(raw));
+  } catch (e) { /* 저장소 사용 불가 시 샘플로 시작 */ }
+  return sampleState();
+}
+
+function save() {
+  try {
+    localStorage.setItem(KEY, JSON.stringify(state));
+  } catch (e) {
+    toast('브라우저 저장에 실패했습니다');
+  }
+}
+
+let state = load();
+let tab = 'dash';
+let selDay = null;
+let resFilter = 'all';
+
+const tripDays = () => diffDays(state.trip.start, state.trip.end) + 1;
+const listOf = (kind) => state[LIST[kind]];
+const findItem = (kind, id) => listOf(kind).find((x) => x.id === id);
+const clampDay = (d) => (d < state.trip.start ? state.trip.start : d > state.trip.end ? state.trip.end : d);
+
+/* ---------- 렌더 ---------- */
+function render() {
+  const t = state.trip;
+  $('#tripTitle').textContent = t.name || '여행';
+  $('#tripSub').textContent = [t.destination, `${t.start} ~ ${t.end} (${tripDays()}일)`].filter(Boolean).join(' · ');
+  $('#sampleBanner').hidden = !state.sample;
+  const views = { dash: viewDash, itin: viewItin, res: viewRes, todo: viewTodo, budget: viewBudget, info: viewInfo };
+  $('#view').innerHTML = views[tab]();
+}
+
+function rowBtns(kind, id) {
+  return `<div class="row-btns">
+    <button class="ghost sm" data-action="edit" data-kind="${kind}" data-id="${id}">수정</button>
+    <button class="ghost sm danger-text" data-action="del" data-kind="${kind}" data-id="${id}">삭제</button>
+  </div>`;
+}
+
+function viewDash() {
+  const T = today(), t = state.trip;
+  const dd = diffDays(T, t.start);
+  const dayNo = diffDays(t.start, T) + 1;
+  let status;
+  if (dd > 0) status = [`D-${dd}`, '출발까지'];
+  else if (dayNo <= tripDays()) status = [`${dayNo}일차`, '여행 중'];
+  else status = ['종료', '여행이 끝났습니다'];
+
+  const spent = sum(state.expenses.map((x) => x.amount));
+  const budget = Number(t.budget) || 0;
+  const unpaid = state.reservations.filter((r) => !r.paid && Number(r.cost) > 0);
+  const doneCnt = state.todos.filter((x) => x.done).length;
+  const open = state.todos.filter((x) => !x.done);
+
+  const upcoming = state.reservations
+    .filter((r) => dayOf(r.end || r.start) >= T)
+    .sort(byStart).slice(0, 5);
+  const todayItems = state.itinerary.filter((x) => x.date === T).sort(byTime);
+
+  const kpis = `
+    <div class="kpi main"><small>${status[1]}</small><b>${status[0]}</b><span>${esc(t.destination)}</span></div>
+    <div class="kpi"><small>예산 사용</small><b>${won(spent)}</b><span>${budget ? `예산 ${won(budget)} · 남은 ${won(budget - spent)}` : '예산 미설정'}</span></div>
+    <div class="kpi"><small>준비 체크</small><b>${doneCnt}/${state.todos.length}</b><span>${open.length}개 남음</span></div>
+    <div class="kpi ${unpaid.length ? 'warn' : ''}"><small>미결제 예약</small><b>${unpaid.length}건</b><span>${unpaid.length ? won(sum(unpaid.map((r) => r.cost))) : '없음'}</span></div>`;
+
+  const todayList = todayItems.map((x) => `
+    <li class="item"><span class="time">${esc(x.time || '—')}</span>
+      <div class="body"><b>${esc(x.title)}</b>${x.place ? `<div class="muted">📍 ${esc(x.place)}</div>` : ''}</div></li>`).join('')
+    || '<li class="empty">오늘 일정이 없습니다</li>';
+
+  const upList = upcoming.map((r) => `
+    <li class="item"><span class="time">${fmtDT(r.start)}</span>
+      <div class="body"><b>${esc(r.title)}</b> <span class="badge">${esc(r.type)}</span>${r.place ? `<div class="muted">${esc(r.place)}</div>` : ''}</div></li>`).join('')
+    || '<li class="empty">예정된 예약이 없습니다</li>';
+
+  const todoList = open.slice(0, 6).map((x) => `
+    <li class="item todo"><label><input type="checkbox" data-action="toggle-todo" data-id="${x.id}"> <span>${esc(x.text)}</span></label></li>`).join('')
+    || '<li class="empty">모두 완료했습니다 🎉</li>';
+
+  return `
+    <div class="kpis">${kpis}</div>
+    <div class="grid2">
+      <section class="panel"><h3>오늘 일정 <small>${fmtDate(T)}</small></h3><ul class="list">${todayList}</ul></section>
+      <section class="panel"><h3>다가오는 예약</h3><ul class="list">${upList}</ul></section>
+      <section class="panel"><h3>남은 준비물·할일</h3><ul class="list">${todoList}</ul></section>
+    </div>`;
+}
+
+function viewItin() {
+  const t = state.trip;
+  if (!selDay || selDay < t.start || selDay > t.end) {
+    selDay = clampDay(today());
+  }
+  const days = Array.from({ length: tripDays() }, (_, i) => addDays(t.start, i));
+  const strip = days.map((d, i) => {
+    const cnt = state.itinerary.filter((x) => x.date === d).length
+      + state.reservations.filter((r) => dayOf(r.start) <= d && d <= dayOf(r.end || r.start)).length;
+    return `<button class="day ${d === selDay ? 'on' : ''} ${d === today() ? 'today' : ''}" data-action="sel-day" data-date="${d}">
+      <span>${i + 1}일</span><small>${fmtDate(d).replace(' (', ' ').replace(')', '')}</small>${cnt ? `<i>${cnt}</i>` : ''}</button>`;
+  }).join('');
+
+  const resRows = state.reservations
+    .filter((r) => dayOf(r.start) <= selDay && selDay <= dayOf(r.end || r.start))
+    .sort(byStart)
+    .map((r) => {
+      const s = dayOf(r.start) === selDay, e = dayOf(r.end || r.start) === selDay;
+      const tag = s ? '시작' : e ? '종료' : '숙박·진행 중';
+      const time = s ? timeOf(r.start) : e ? timeOf(r.end) : '';
+      return `<li class="item res-item"><span class="time">${esc(time || '—')}</span>
+        <div class="body"><b>${esc(r.title)}</b> <span class="badge">${esc(r.type)} · ${tag}</span>
+        ${r.place ? `<div class="muted">📍 ${esc(r.place)}</div>` : ''}</div></li>`;
+    }).join('');
+
+  const items = state.itinerary.filter((x) => x.date === selDay).sort(byTime);
+  const itemRows = items.map((x) => `
+    <li class="item"><span class="time">${esc(x.time || '—')}</span>
+      <div class="body"><b>${esc(x.title)}</b> <span class="badge">${esc(x.category)}</span>
+        ${x.place ? `<div class="muted">📍 ${esc(x.place)}</div>` : ''}
+        ${x.memo ? `<div class="memo">${esc(x.memo)}</div>` : ''}</div>
+      ${rowBtns('itin', x.id)}</li>`).join('');
+
+  const empty = !resRows && !itemRows ? '<li class="empty">이 날의 일정이 없습니다</li>' : '';
+  return `
+    <div class="toolbar"><h2>일정</h2><button class="primary" data-action="add" data-kind="itin">+ 일정 추가</button></div>
+    <div class="days">${strip}</div>
+    <h3 class="dayhead">${fmtDate(selDay)} <span class="muted">· 여행 ${diffDays(t.start, selDay) + 1}일차</span></h3>
+    <ul class="list">${resRows}${itemRows}${empty}</ul>`;
+}
+
+function viewRes() {
+  const types = [...new Set(state.reservations.map((r) => r.type))];
+  const chips = ['all', ...types].map((v) =>
+    `<button class="chip ${resFilter === v ? 'on' : ''}" data-action="res-filter" data-v="${esc(v)}">${v === 'all' ? '전체' : esc(v)}</button>`).join('');
+  const list = state.reservations.filter((r) => resFilter === 'all' || r.type === resFilter).sort(byStart);
+  const cards = list.map((r) => `
+    <li class="card">
+      <div class="card-head"><span class="badge">${esc(r.type)}</span>
+        <button class="paid ${r.paid ? 'on' : ''}" data-action="toggle-paid" data-id="${r.id}">${r.paid ? '결제 완료' : '미결제'}</button></div>
+      <h3>${esc(r.title)}</h3>
+      <dl>
+        <dt>일정</dt><dd>${fmtDT(r.start)}${r.end ? ' ~ ' + fmtDT(r.end) : ''}</dd>
+        ${r.code ? `<dt>예약번호</dt><dd class="code">${esc(r.code)}</dd>` : ''}
+        ${r.place ? `<dt>장소</dt><dd>${esc(r.place)}</dd>` : ''}
+        ${r.cost ? `<dt>금액</dt><dd>${won(r.cost)}</dd>` : ''}
+      </dl>
+      ${r.url ? `<a href="${esc(safeUrl(r.url))}" target="_blank" rel="noopener">예약 페이지 열기 ↗</a>` : ''}
+      ${r.memo ? `<div class="memo">${esc(r.memo)}</div>` : ''}
+      ${rowBtns('res', r.id)}
+    </li>`).join('');
+  return `
+    <div class="toolbar"><h2>예약</h2><button class="primary" data-action="add" data-kind="res">+ 예약 추가</button></div>
+    <div class="chips">${chips}</div>
+    <ul class="cards">${cards || '<li class="empty">예약이 없습니다</li>'}</ul>`;
+}
+
+function viewTodo() {
+  const total = state.todos.length, done = state.todos.filter((x) => x.done).length;
+  const pct = total ? Math.round((done / total) * 100) : 0;
+  const groups = [...new Set([...TODO_GROUPS, ...state.todos.map((x) => x.group)])];
+  const sections = groups.map((g) => {
+    const items = state.todos.filter((x) => x.group === g);
+    if (!items.length) return '';
+    return `<section class="panel" style="margin-bottom:12px"><h3>${esc(g)}</h3><ul class="list">${items.map((x) => `
+      <li class="item todo ${x.done ? 'done' : ''}">
+        <label><input type="checkbox" data-action="toggle-todo" data-id="${x.id}" ${x.done ? 'checked' : ''}> <span>${esc(x.text)}</span></label>
+        ${rowBtns('todo', x.id)}
+      </li>`).join('')}</ul></section>`;
+  }).join('');
+  return `
+    <div class="toolbar"><h2>준비물·할일 <span class="muted">${done}/${total} 완료</span></h2>
+      <button class="primary" data-action="add" data-kind="todo">+ 항목 추가</button></div>
+    <div class="bar"><i style="width:${pct}%"></i></div>
+    ${sections || '<p class="empty">항목이 없습니다</p>'}`;
+}
+
+function viewBudget() {
+  const t = state.trip;
+  const spent = sum(state.expenses.map((x) => x.amount));
+  const budget = Number(t.budget) || 0;
+  const pct = budget ? Math.min(100, Math.round((spent / budget) * 100)) : 0;
+  const resTotal = sum(state.reservations.map((r) => r.cost));
+  const resUnpaid = sum(state.reservations.filter((r) => !r.paid).map((r) => r.cost));
+
+  const cats = {};
+  state.expenses.forEach((x) => (cats[x.category] = (cats[x.category] || 0) + (Number(x.amount) || 0)));
+  const catRows = Object.entries(cats).sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `<tr><td>${esc(k)}</td><td class="num">${won(v)}</td></tr>`).join('');
+
+  const rows = [...state.expenses].sort((a, b) => (a.date || '').localeCompare(b.date || '')).map((x) => `
+    <li class="item"><span class="time">${fmtDate(x.date)}</span>
+      <div class="body"><b>${esc(x.title)}</b> <span class="badge">${esc(x.category)}</span></div>
+      <span class="amt">${won(x.amount)}</span>${rowBtns('exp', x.id)}</li>`).join('');
+
+  return `
+    <div class="toolbar"><h2>예산</h2><button class="primary" data-action="add" data-kind="exp">+ 지출 추가</button></div>
+    <div class="stats">
+      <div class="kpi"><small>지출 합계</small><b>${won(spent)}</b></div>
+      <div class="kpi"><small>예산</small><b>${budget ? won(budget) : '미설정'}</b><span>${budget ? `남은 ${won(budget - spent)}` : '여행 정보에서 설정'}</span></div>
+      <div class="kpi"><small>예약 총액</small><b>${won(resTotal)}</b><span>미결제 ${won(resUnpaid)}</span></div>
+    </div>
+    <div class="bar"><i style="width:${pct}%"></i></div>
+    <div class="grid2">
+      <section class="panel"><h3>분류별</h3>${catRows ? `<table>${catRows}</table>` : '<p class="empty">지출이 없습니다</p>'}</section>
+      <section class="panel"><h3>지출 내역</h3><ul class="list">${rows || '<li class="empty">지출이 없습니다</li>'}</ul></section>
+    </div>`;
+}
+
+function viewInfo() {
+  const rows = state.info.map((x) => `
+    <li class="item"><div class="body"><b>${esc(x.label)}</b>
+      <div class="info-val ${x.value ? '' : 'muted'}">${esc(x.value) || '내용을 입력하세요'}</div></div>
+      ${rowBtns('info', x.id)}</li>`).join('');
+  return `
+    <div class="toolbar"><h2>중요 정보</h2><button class="primary" data-action="add" data-kind="info">+ 항목 추가</button></div>
+    <section class="panel"><ul class="list">${rows || '<li class="empty">항목이 없습니다</li>'}</ul></section>`;
+}
+
+/* ---------- 폼 (추가/수정 공용 대화상자) ---------- */
+const FORMS = {
+  itin: { title: '일정', fields: [
+    { k: 'date', label: '날짜', type: 'date', req: true },
+    { k: 'time', label: '시간', type: 'time' },
+    { k: 'title', label: '제목', req: true },
+    { k: 'place', label: '장소' },
+    { k: 'category', label: '분류', type: 'select', options: ITIN_CATS },
+    { k: 'memo', label: '메모', type: 'textarea' },
+  ] },
+  res: { title: '예약', fields: [
+    { k: 'type', label: '종류', type: 'select', options: RES_TYPES, req: true },
+    { k: 'title', label: '예약명', req: true },
+    { k: 'code', label: '예약번호' },
+    { k: 'start', label: '시작 (날짜·시간)', type: 'datetime-local', req: true },
+    { k: 'end', label: '종료 (날짜·시간)', type: 'datetime-local' },
+    { k: 'place', label: '장소 / 주소' },
+    { k: 'cost', label: '금액 (원)', type: 'number' },
+    { k: 'paid', label: '결제 완료', type: 'checkbox' },
+    { k: 'url', label: '예약 페이지 링크', type: 'url' },
+    { k: 'memo', label: '메모', type: 'textarea' },
+  ] },
+  todo: { title: '준비물·할일', fields: [
+    { k: 'group', label: '분류', type: 'select', options: TODO_GROUPS },
+    { k: 'text', label: '내용', req: true },
+  ] },
+  exp: { title: '지출', fields: [
+    { k: 'date', label: '날짜', type: 'date', req: true },
+    { k: 'category', label: '분류', type: 'select', options: EXP_CATS },
+    { k: 'title', label: '내용', req: true },
+    { k: 'amount', label: '금액 (원)', type: 'number', req: true },
+  ] },
+  info: { title: '중요 정보', fields: [
+    { k: 'label', label: '항목', req: true },
+    { k: 'value', label: '내용', type: 'textarea' },
+  ] },
+  trip: { title: '여행 정보', fields: [
+    { k: 'name', label: '여행 이름', req: true },
+    { k: 'destination', label: '여행지' },
+    { k: 'start', label: '출발일', type: 'date', req: true },
+    { k: 'end', label: '귀국일', type: 'date', req: true },
+    { k: 'budget', label: '예산 (원)', type: 'number' },
+  ] },
+};
+
+const dlg = $('#dlg');
+let editing = null; // { kind, id }
+
+function defaultsFor(kind) {
+  if (kind === 'itin') return { date: selDay || state.trip.start };
+  if (kind === 'exp') return { date: clampDay(today()) };
+  if (kind === 'res') return { type: resFilter !== 'all' ? resFilter : '항공' };
+  if (kind === 'todo') return { group: '준비물' };
+  return {};
+}
+
+function openForm(kind, item, defaults = {}) {
+  const f = FORMS[kind];
+  editing = { kind, id: item && kind !== 'trip' ? item.id : null };
+  $('#dlgTitle').textContent = `${item ? '수정' : '추가'} · ${f.title}`;
+  const src = { ...defaults, ...(item || {}) };
+  $('#dlgFields').innerHTML = f.fields.map((x) => {
+    const v = src[x.k] ?? (x.type === 'checkbox' ? false : '');
+    const id = 'f_' + x.k;
+    const req = x.req ? ' required' : '';
+    if (x.type === 'checkbox') return `<label class="check"><input type="checkbox" id="${id}" ${v ? 'checked' : ''}> ${esc(x.label)}</label>`;
+    if (x.type === 'select') return `<label>${esc(x.label)}<select id="${id}">${x.options.map((o) => `<option ${o === v ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select></label>`;
+    if (x.type === 'textarea') return `<label>${esc(x.label)}<textarea id="${id}" rows="3">${esc(v)}</textarea></label>`;
+    return `<label>${esc(x.label)}<input id="${id}" type="${x.type || 'text'}" value="${esc(v)}"${req}></label>`;
+  }).join('');
+  const del = $('#dlgDelete');
+  del.hidden = !item || kind === 'trip';
+  del.dataset.kind = kind;
+  del.dataset.id = item ? item.id : '';
+  dlg.showModal();
+}
+
+$('#dlgForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const f = FORMS[editing.kind];
+  const data = {};
+  for (const x of f.fields) {
+    const el = $('#f_' + x.k);
+    if (x.type === 'checkbox') data[x.k] = el.checked;
+    else if (x.type === 'number') data[x.k] = el.value === '' ? 0 : Number(el.value);
+    else data[x.k] = el.value.trim();
+    if (x.req && data[x.k] === '') { el.focus(); toast(`${x.label}을(를) 입력하세요`); return; }
+  }
+  if (editing.kind === 'trip') {
+    if (data.end < data.start) { toast('귀국일이 출발일보다 빠릅니다'); return; }
+    Object.assign(state.trip, data);
+  } else {
+    const list = listOf(editing.kind);
+    if (editing.id) Object.assign(list.find((x) => x.id === editing.id), data);
+    else list.push({ id: uid(), ...data });
+  }
+  dlg.close();
+  save();
+  render();
+  toast('저장했습니다');
+});
+
+/* ---------- 이벤트 ---------- */
+$('#tabs').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-tab]');
+  if (!b) return;
+  tab = b.dataset.tab;
+  document.querySelectorAll('#tabs button').forEach((x) => x.classList.toggle('active', x === b));
+  render();
+});
+
+document.addEventListener('click', (e) => {
+  const el = e.target.closest('[data-action]');
+  if (!el) return;
+  const { action: a, kind, id } = el.dataset;
+  switch (a) {
+    case 'add':
+      openForm(kind, null, defaultsFor(kind));
+      break;
+    case 'edit':
+      openForm(kind, findItem(kind, id));
+      break;
+    case 'del': {
+      if (!confirm('삭제할까요?')) break;
+      if (dlg.open) dlg.close();
+      const list = listOf(kind);
+      list.splice(list.findIndex((x) => x.id === id), 1);
+      save(); render(); toast('삭제했습니다');
+      break;
+    }
+    case 'dlg-cancel':
+      dlg.close();
+      break;
+    case 'toggle-todo': {
+      const it = findItem('todo', el.dataset.id);
+      it.done = el.checked; // 클릭 후의 체크 상태
+      save(); render();
+      break;
+    }
+    case 'toggle-paid': {
+      const r = state.reservations.find((x) => x.id === el.dataset.id);
+      r.paid = !r.paid;
+      save(); render();
+      break;
+    }
+    case 'sel-day':
+      selDay = el.dataset.date;
+      render();
+      break;
+    case 'res-filter':
+      resFilter = el.dataset.v;
+      render();
+      break;
+    case 'edit-trip':
+      openForm('trip', state.trip);
+      break;
+    case 'export':
+      exportJSON();
+      break;
+    case 'clear-sample':
+      if (!confirm('샘플 데이터를 모두 지울까요? 직접 입력한 내용도 함께 지워집니다.')) break;
+      state = emptyState();
+      save(); render();
+      break;
+  }
+});
+
+function exportJSON() {
+  const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `travel-backup-${today()}.json`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+$('#importFile').addEventListener('change', async (e) => {
+  const f = e.target.files[0];
+  e.target.value = '';
+  if (!f) return;
+  try {
+    const obj = JSON.parse(await f.text());
+    if (!obj.trip || !Array.isArray(obj.itinerary)) throw new Error('format');
+    state = normalize(obj);
+    save(); render();
+    toast('가져왔습니다');
+  } catch (err) {
+    toast('올바른 백업 파일이 아닙니다');
+  }
+});
+
+/* ---------- 시작 ---------- */
+try {
+  if (!localStorage.getItem(KEY)) save();
+} catch (e) { /* 무시 */ }
+render();
+})();

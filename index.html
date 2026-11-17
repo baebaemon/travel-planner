@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>12월 여행 관리</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <h1 id="tripTitle">여행</h1>
+    <p id="tripSub" class="muted"></p>
+  </div>
+  <div class="top-actions">
+    <button class="ghost" data-action="edit-trip">여행 정보</button>
+    <button class="ghost" data-action="export">내보내기</button>
+    <label class="ghost btn-like">가져오기<input type="file" id="importFile" accept="application/json" hidden></label>
+  </div>
+</header>
+
+<nav class="tabs" id="tabs">
+  <button data-tab="dash" class="active">대시보드</button>
+  <button data-tab="itin">일정</button>
+  <button data-tab="res">예약</button>
+  <button data-tab="todo">준비물·할일</button>
+  <button data-tab="budget">예산</button>
+  <button data-tab="info">중요 정보</button>
+</nav>
+
+<main>
+  <div id="sampleBanner" class="banner" hidden>
+    샘플 데이터가 들어 있습니다. 확인 후 지우고 직접 입력하세요.
+    <button class="ghost sm" data-action="clear-sample">샘플 지우기</button>
+  </div>
+  <section id="view"></section>
+</main>
+
+<dialog id="dlg">
+  <form id="dlgForm">
+    <h2 id="dlgTitle"></h2>
+    <div id="dlgFields" class="fields"></div>
+    <div class="dlg-actions">
+      <button type="button" class="danger" id="dlgDelete" data-action="del" hidden>삭제</button>
+      <span class="grow"></span>
+      <button type="button" class="ghost" data-action="dlg-cancel">취소</button>
+      <button type="submit" class="primary">저장</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toast" class="toast" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>
